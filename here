@@ -1,139 +1,160 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
 #include <SPI.h>
 #include <MFRC522.h>
 
-const int PIR_PIN = 26;       // Pin input sensor PIR   
-const int TRIG_PIN_1 = 27;    // Pin untuk TRIG sensor ultrasonik pertama
-const int ECHO_PIN_1 = 33;    // Pin untuk ECHO sensor ultrasonik pertama
-const int TRIG_PIN_2 = 32;    // Pin untuk TRIG sensor ultrasonik kedua
-const int ECHO_PIN_2 = 35;    // Pin untuk ECHO sensor ultrasonik kedua
-const int RELAY_PIN = 25;      // Pin untuk relay
+// ======================== WiFi Configuration ========================
+const char* ssid = "Aster Caffe";        // Ganti dengan nama WiFi Anda
+const char* password = "americano";      // Ganti dengan password WiFi Anda
 
-int pirState = LOW;           // Status saat ini dari sensor PIR
-int pirStatePrev = HIGH;      // Status sebelumnya untuk mendeteksi perubahan
+// ======================== MQTT Configuration ========================
+const char* mqttServer = "192.168.1.100";  // Ganti dengan IP lokal broker MQTT
+const int mqttPort = 1883;
+const char* mqttUser = "";                 // Kosongkan jika tidak ada autentikasi
+const char* mqttPassword = "";
 
-// Jarak dasar ketika rak penuh (misalnya 100 cm)
-const long baselineDistance = 100; // Jarak dalam cm
-const int itemHeight = 10;         // Tinggi setiap barang dalam cm
-const int totalItems = 10;         // Jumlah barang awal
+WiFiClient espClient;
+PubSubClient client(espClient);
 
-// RFID pins for ESP32
-#define SS_PIN 21   // Pin Slave Select untuk RFID
-#define RST_PIN 22  // Pin Reset untuk RFID
-#define SCK_PIN 18  // Pin Serial Clock
-#define MOSI_PIN 23 // Pin Master Out Slave In
-#define MISO_PIN 19 // Pin Master In Slave Out
+// ======================== Pin Definitions ========================
+const int PIR_PIN = 26;
+const int TRIG_PIN_1 = 27;
+const int ECHO_PIN_1 = 33;
+const int TRIG_PIN_2 = 32;
+const int ECHO_PIN_2 = 35;
+const int RELAY_PIN = 25;
 
-MFRC522 rfid(SS_PIN, RST_PIN); // Instance MFRC522
+// ======================== RFID Configuration ========================
+#define SS_PIN 21
+#define RST_PIN 22
+#define SCK_PIN 18
+#define MOSI_PIN 23
+#define MISO_PIN 19
 
-// Authorized card UID example (ganti dengan UID yang benar)
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// ======================== System Variables ========================
+int pirState = LOW;
+int pirStatePrev = HIGH;
+const int itemHeight = 10;
+const int totalItems = 10;
+
+// Daftar UID yang diizinkan (ganti sesuai kebutuhan)
 byte authorizedUID[][4] = {
-  {0x61, 0x77, 0xB3, 0x7B},  // UID pertama
-  {0x93, 0x04, 0x5D, 0x29}   // UID kedua
+  {0x61, 0x77, 0xB3, 0x7B},
+  {0x93, 0x04, 0x5D, 0x29}
 };
-const int authorizedUIDCount = 2; // Jumlah UID yang diotorisasi
+const int authorizedUIDCount = 2;
 
-void setup() {
-  Serial.begin(115200);            // Inisialisasi komunikasi Serial
-  pinMode(PIR_PIN, INPUT);         // Set pin sensor PIR sebagai input
-  pinMode(TRIG_PIN_1, OUTPUT);     // Set pin TRIG sensor ultrasonik pertama sebagai output
-  pinMode(ECHO_PIN_1, INPUT);      // Set pin ECHO sensor ultrasonik pertama sebagai input
-  pinMode(TRIG_PIN_2, OUTPUT);     // Set pin TRIG sensor ultrasonik kedua sebagai output
-  pinMode(ECHO_PIN_2, INPUT);      // Set pin ECHO sensor ultrasonik kedua sebagai input
-  pinMode(RELAY_PIN, OUTPUT);      // Set pin relay sebagai output
-  digitalWrite(RELAY_PIN, LOW);    // Pastikan relay OFF saat start
-
-  // Inisialisasi SPI dengan pin custom untuk ESP32
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
-  rfid.PCD_Init();                 // Inisialisasi MFRC522
-  
-  Serial.println("Scan your RFID card...");
-}
-
-long measureDistance(int trigPin, int echoPin) {
-  // Mengukur jarak menggunakan sensor ultrasonik
-  long duration;
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  duration = pulseIn(echoPin, HIGH, 30000); // timeout 30ms untuk keamanan
-  long distance = (duration * 0.034) / 2; // cm
-  return distance;
-}
-
-void loop() {
-  // Membaca status sensor PIR
-  pirState = digitalRead(PIR_PIN);
-
-  // Jika ada gerakan terdeteksi
-  if (pirState == HIGH && pirStatePrev == LOW) {
-    Serial.println("Ada orang!");
+// ======================== Function: WiFi ========================
+void connectToWiFi() {
+  Serial.print("Menghubungkan ke WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500); Serial.print(".");
   }
+  Serial.println("\nTersambung ke WiFi");
+}
 
-  // Mengukur jarak menggunakan sensor ultrasonik pertama
+// ======================== Function: MQTT ========================
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Menghubungkan ke MQTT...");
+    if (client.connect("ESP32Client", mqttUser, mqttPassword)) {
+      Serial.println("Terhubung!");
+    } else {
+      Serial.print("Gagal, status=");
+      Serial.println(client.state());
+      delay(2000);
+    }
+  }
+}
+
+// ======================== Function: Ultrasonic ========================
+long measureDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW); delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  return (duration * 0.034) / 2;
+}
+
+// ======================== Setup ========================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIR_PIN, INPUT);
+  pinMode(TRIG_PIN_1, OUTPUT); pinMode(ECHO_PIN_1, INPUT);
+  pinMode(TRIG_PIN_2, OUTPUT); pinMode(ECHO_PIN_2, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  rfid.PCD_Init();
+
+  connectToWiFi();
+  client.setServer(mqttServer, mqttPort);
+
+  Serial.println("Scan kartu RFID untuk mulai...");
+}
+
+// ======================== Loop ========================
+void loop() {
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+
+  pirState = digitalRead(PIR_PIN);
+  if (pirState == HIGH && pirStatePrev == LOW) {
+    Serial.println("Gerakan terdeteksi!");
+    client.publish("rak/pir", "Gerakan terdeteksi");
+  }
+  pirStatePrev = pirState;
+
   long distance1 = measureDistance(TRIG_PIN_1, ECHO_PIN_1);
-
-  // Mengukur jarak menggunakan sensor ultrasonik kedua
   long distance2 = measureDistance(TRIG_PIN_2, ECHO_PIN_2);
-
-  // Menghitung jumlah barang yang tersisa berdasarkan jarak dari sensor pertama
   int itemsLeft1 = max(0L, totalItems - (distance1 / itemHeight));
   int itemsLeft2 = max(0L, totalItems - (distance2 / itemHeight));
 
-  // Menampilkan jarak dan jumlah barang di Serial Monitor
-  Serial.print("Jarak Sensor 1: ");
-  Serial.print(distance1);
-  Serial.print(" cm, Barang tersisa (Sensor 1): ");
-  Serial.println(itemsLeft1);
+  char payload[128];
+  sprintf(payload, "{\"distance1\":%ld,\"items1\":%d,\"distance2\":%ld,\"items2\":%d}", distance1, itemsLeft1, distance2, itemsLeft2);
+  client.publish("rak/status", payload);
 
-  Serial.print("Jarak Sensor 2: ");
-  Serial.print(distance2);
-  Serial.print(" cm, Barang tersisa (Sensor 2): ");
-  Serial.println(itemsLeft2);
-
-  // Memeriksa kartu RFID
+  // RFID check
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    Serial.print("UID tag:");
-
-    // Print semua byte UID yang terbaca (debug)
+    Serial.print("UID kartu: ");
     for (byte i = 0; i < rfid.uid.size; i++) {
       Serial.print(rfid.uid.uidByte[i] < 0x10 ? " 0" : " ");
       Serial.print(rfid.uid.uidByte[i], HEX);
     }
     Serial.println();
 
-    // Cek apakah UID sesuai dengan yang authorized
     bool authorized = false;
     for (int j = 0; j < authorizedUIDCount; j++) {
-      if (rfid.uid.size == 4) { // Pastikan ukuran UID sesuai
-        authorized = true;
-        for (byte i = 0; i < 4; i++) {
-          if (rfid.uid.uidByte[i] != authorizedUID[j][i]) {
-            authorized = false;
-            break;
-          }
+      authorized = true;
+      for (byte i = 0; i < 4; i++) {
+        if (rfid.uid.uidByte[i] != authorizedUID[j][i]) {
+          authorized = false;
+          break;
         }
-        if (authorized) break; // Jika ditemukan UID yang cocok, keluar dari loop
       }
+      if (authorized) break;
     }
 
     if (authorized) {
-      Serial.println("Kartu terotorisasi! Membuka pintu.");
-      digitalWrite(RELAY_PIN, HIGH);  // Buka relay
-      delay(5000);                    // Buka selama 5 detik
-      digitalWrite(RELAY_PIN, LOW);   // Tutup relay
-      Serial.println("Pintu terkunci kembali.");
+      Serial.println("Kartu dikenali. Relay aktif.");
+      client.publish("rak/akses", "Akses diterima");
+      digitalWrite(RELAY_PIN, HIGH);
+      delay(5000);
+      digitalWrite(RELAY_PIN, LOW);
+      Serial.println("Relay dimatikan.");
     } else {
-      Serial.println("Kartu tidak dikenal!");
-      Serial.println("Silakan cek UID yang terbaca di atas dan update authorizedUID di kode.");
+      Serial.println("Kartu tidak dikenali.");
+      client.publish("rak/akses", "Akses ditolak");
     }
+
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
   }
 
-  pirStatePrev = pirState;
-
-  delay(900);
+  delay(1000);
 }
